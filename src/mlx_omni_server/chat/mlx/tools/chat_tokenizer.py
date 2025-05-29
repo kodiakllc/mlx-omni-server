@@ -34,8 +34,31 @@ class ChatTokenizer(ABC):
         should_prefill = messages[-1].role == Role.ASSISTANT
 
         conversation = []
-        for message in messages:
+        last_role = None
+        
+        for i, message in enumerate(messages):
             msg_dict = message.model_dump(exclude_none=True)
+            current_role = msg_dict["role"]
+            
+            # Skip consecutive messages with the same role to ensure alternation
+            if last_role == current_role and current_role in (Role.USER, Role.ASSISTANT):
+                # For consecutive same roles, we can either skip or merge
+                # Here we'll merge the content
+                if conversation and conversation[-1]["role"] == current_role:
+                    prev_content = conversation[-1].get("content", "")
+                    new_content = msg_dict.get("content", "")
+                    if isinstance(new_content, list):
+                        new_content = "\n\n".join(
+                            item["text"]
+                            for item in new_content
+                            if item.get("type") == "text"
+                        )
+                    if prev_content and new_content:
+                        conversation[-1]["content"] = f"{prev_content}\n\n{new_content}"
+                    elif new_content:
+                        conversation[-1]["content"] = new_content
+                    continue
+            
             if isinstance(msg_dict.get("content"), list):
                 msg_dict["content"] = "\n\n".join(
                     item["text"]
@@ -48,7 +71,9 @@ class ChatTokenizer(ABC):
                 Role.ASSISTANT,
             ):
                 msg_dict["content"] = ""
+            
             conversation.append(msg_dict)
+            last_role = current_role
 
         if should_prefill:
             prompt = self.tokenizer.apply_chat_template(

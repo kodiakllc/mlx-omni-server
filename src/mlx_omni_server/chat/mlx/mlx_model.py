@@ -421,13 +421,11 @@ class MLXModel(BaseTextModel):
             accumulated_text = ""
             in_thinking_mode = False
             thinking_content = ""
-            had_thinking_tag = False
 
             # Check if the model type might use thinking tokens
             # Configure thinking mode based on model name or explicit template parameter
             enable_thinking = "DeepSeek" in request.model or template_kwargs.get("enable_thinking", False)
-            if enable_thinking:
-                in_thinking_mode = True
+            in_thinking_mode = enable_thinking
 
             for result in self._stream_generate(
                 prompt=prompt,
@@ -468,27 +466,75 @@ class MLXModel(BaseTextModel):
                     continue
                 
                 # Handle case where first chunk might start with thinking content without an opening tag
-                if not in_thinking_mode and "</think>" in chunk and "<think>" not in accumulated_text:
+                if not in_thinking_mode and "</think>" in chunk and "<think>" not in chunk:
                     in_thinking_mode = True
                     thinking_content = chunk  # Capture this chunk for processing
                     
                 if "</think>" in chunk and in_thinking_mode:
-                    in_thinking_mode = False
-                    # Split at </think>
-                    parts = chunk.split("</think>", 1)
-                    thinking_part = parts[0]
-                    visible_part = parts[1] if len(parts) > 1 else ""
+                    # Process all </think> tags in the chunk iteratively
+                    remaining_chunk = chunk
+                    while "</think>" in remaining_chunk:
+                        # Split at the first </think>
+                        parts = remaining_chunk.split("</think>", 1)
+                        thinking_part = parts[0]
+                        remaining_chunk = parts[1] if len(parts) > 1 else ""
+                        
+                        # Add to thinking content
+                        thinking_content += thinking_part + "</think>"
+                        
+                        # Extract and process thinking content
+                        full_thinking = self._extract_thinking(thinking_content)
+                        
+                        # Only emit reasoning if we have actual thinking content
+                        if full_thinking:
+                            # Use reasoning field
+                            created = int(time.time())
+                            yield ChatCompletionChunk(
+                                id=chat_id,
+                                created=created,
+                                model=request.model,
+                                choices=[
+                                    ChatCompletionChunkChoice(
+                                        index=0,
+                                        delta=ChatMessage(role=Role.ASSISTANT, reasoning=full_thinking),
+                                        finish_reason=result.finish_reason,
+                                        logprobs=result.logprobs,
+                                    )
+                                ],
+                            )
+                        
+                        # Reset thinking content for next potential thinking section
+                        thinking_content = ""
+                        
+                        # Check if there's a new thinking section starting
+                        if "<think>" in remaining_chunk:
+                            in_thinking_mode = True
+                            # Split at the first <think>
+                            parts = remaining_chunk.split("<think>", 1)
+                            visible_part = parts[0]
+                            thinking_content = "<think>" + parts[1] if len(parts) > 1 else ""
+                            
+                            # Yield the visible part if any
+                            if visible_part:
+                                yield ChatCompletionChunk(
+                                    id=chat_id,
+                                    created=created,
+                                    model=request.model,
+                                    choices=[
+                                        ChatCompletionChunkChoice(
+                                            index=0,
+                                            delta=ChatMessage(role=Role.ASSISTANT, content=visible_part),
+                                            finish_reason=result.finish_reason,
+                                            logprobs=result.logprobs,
+                                        )
+                                    ],
+                                )
+                            remaining_chunk = ""  # Already processed
+                        else:
+                            in_thinking_mode = False
                     
-                    # Add to thinking content
-                    thinking_content += thinking_part + "</think>"
-                    
-                    # Extract and process thinking content
-                    full_thinking = self._extract_thinking(thinking_content)
-                    
-                    # Only emit reasoning if we have actual thinking content
-                    if full_thinking:
-                        # Use reasoning field
-                        created = int(time.time())
+                    # Yield any remaining visible content after all </think> tags are processed
+                    if remaining_chunk:
                         yield ChatCompletionChunk(
                             id=chat_id,
                             created=created,
@@ -496,30 +542,12 @@ class MLXModel(BaseTextModel):
                             choices=[
                                 ChatCompletionChunkChoice(
                                     index=0,
-                                    delta=ChatMessage(role=Role.ASSISTANT, reasoning=full_thinking),
+                                    delta=ChatMessage(role=Role.ASSISTANT, content=remaining_chunk),
                                     finish_reason=result.finish_reason,
                                     logprobs=result.logprobs,
                                 )
                             ],
                         )
-                    
-                    # Yield the visible part if any
-                    if visible_part:
-                        yield ChatCompletionChunk(
-                            id=chat_id,
-                            created=created,
-                            model=request.model,
-                            choices=[
-                                ChatCompletionChunkChoice(
-                                    index=0,
-                                    delta=ChatMessage(role=Role.ASSISTANT, content=visible_part),
-                                    finish_reason=result.finish_reason,
-                                    logprobs=result.logprobs,
-                                )
-                            ],
-                        )
-                    
-                    thinking_content = ""
                     continue
                 
                 # If in thinking mode, accumulate to thinking content
